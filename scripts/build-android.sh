@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -37,50 +37,111 @@ if [[ "$NETWORK_MAGIC" != "42524b52" ]]; then
   exit 1
 fi
 
-mkdir -p "$ROOT/dist" "$ROOT/build"
+# Prevent a stale one-argument implementation from reaching the linker.
+if ! grep -Eq 'int Evaluate\(BoardItem\* Board, SearchDataItem\* SearchData\)' "$ROOT/NNUE2.cpp"; then
+  echo "ERROR: NNUE2.cpp does not define Evaluate(BoardItem*, SearchDataItem*)." >&2
+  echo "Replace the repository-root NNUE2.cpp with the version from this fix ZIP." >&2
+  exit 1
+fi
+
+mkdir -p "$ROOT/dist" "$ROOT/build/obj"
 cd "$ROOT"
+LOG="$ROOT/dist/build.log"
+: > "$LOG"
+
+run_logged() {
+  local label="$1"
+  shift
+  local status=0
+  echo
+  echo "=== $label ==="
+  printf 'COMMAND:'
+  printf ' %q' "$@"
+  printf '\n'
+  set +e
+  "$@" 2>&1 | tee -a "$LOG"
+  status=${PIPESTATUS[0]}
+  set -e
+  if (( status != 0 )); then
+    echo "ERROR: $label failed with exit code $status." >&2
+    echo "----- Last 100 lines of $LOG -----" >&2
+    tail -n 100 "$LOG" >&2 || true
+    echo "---------------------------------" >&2
+    exit "$status"
+  fi
+}
+
 mapfile -t SOURCES < <(find . -maxdepth 1 -type f -name '*.cpp' -printf '%f\n' | sort)
 if [[ "${#SOURCES[@]}" -eq 0 ]]; then
   echo "ERROR: no C++ source files were found." >&2
   exit 1
 fi
 
-OUTPUT="$ROOT/dist/RukChess-Android-ARM64-NEON"
+COMMON_FLAGS=(
+  -std=gnu++17
+  -O3
+  -DNDEBUG
+  -march=armv8-a+simd
+  -fno-strict-aliasing
+  -fno-exceptions
+  -fno-rtti
+  -pthread
+  -Wno-unknown-pragmas
+  -Wno-deprecated-declarations
+  -fdiagnostics-color=never
+)
+
 EMBEDDED_OBJECT="$ROOT/build/embedded_nnue.o"
-echo "Embedding RukChess NNUE into the executable..."
-"$CC" -c "$ROOT/scripts/embedded_nnue.S" -o "$EMBEDDED_OBJECT"
+run_logged "Assemble embedded NNUE object" "$CC" -march=armv8-a+simd -c "$ROOT/scripts/embedded_nnue.S" -o "$EMBEDDED_OBJECT"
+
 echo "Building RukChess Android ARM64 NEON (API 24, NDK r27c)..."
-"$CXX" \
-  -std=gnu++17 \
-  -O3 \
-  -DNDEBUG \
-  -march=armv8-a+simd \
-  -fno-strict-aliasing \
-  -fno-exceptions \
-  -fno-rtti \
+OBJECTS=()
+for SOURCE in "${SOURCES[@]}"; do
+  OBJECT="$ROOT/build/obj/${SOURCE%.cpp}.o"
+  run_logged "Compile $SOURCE" "$CXX" "${COMMON_FLAGS[@]}" -c "$SOURCE" -o "$OBJECT"
+  OBJECTS+=("$OBJECT")
+done
+
+OUTPUT="$ROOT/dist/RukChess-Android-ARM64-NEON"
+run_logged "Link Android ARM64 executable" "$CXX" \
+  -fuse-ld=lld \
   -pthread \
   -static-libstdc++ \
-  -Wno-unknown-pragmas \
-  -Wno-deprecated-declarations \
-  "${SOURCES[@]}" \
+  -Wl,--no-undefined \
+  "${OBJECTS[@]}" \
   "$EMBEDDED_OBJECT" \
   -o "$OUTPUT"
 
-"$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt"
-grep -q 'Machine:.*AArch64' "$ROOT/dist/readelf-header.txt" || {
+echo "\n=== Inspect ELF header ==="
+set +e
+"$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt" 2>> "$LOG"
+STATUS=$?
+set -e
+if (( STATUS != 0 )); then
+  echo "ERROR: ELF header inspection failed with exit code $STATUS." >&2
+  tail -n 100 "$LOG" >&2 || true
+  exit "$STATUS"
+fi
+if ! grep -q 'Machine:.*AArch64' "$ROOT/dist/readelf-header.txt"; then
   echo "ERROR: output is not an AArch64 ELF executable." >&2
   exit 1
-}
+fi
 
-# Confirm the compiler emitted real 128-bit Advanced SIMD instructions from
-# the explicitly selected NEON NNUE path, not just an ARM64 baseline binary.
-"$OBJDUMP" -d --mattr=+neon "$OUTPUT" > "$ROOT/dist/disassembly.txt"
+echo "\n=== Disassemble executable for NEON verification ==="
+set +e
+"$OBJDUMP" -d --mattr=+neon "$OUTPUT" > "$ROOT/dist/disassembly.txt" 2>> "$LOG"
+STATUS=$?
+set -e
+if (( STATUS != 0 )); then
+  echo "ERROR: disassembly failed with exit code $STATUS." >&2
+  tail -n 100 "$LOG" >&2 || true
+  exit "$STATUS"
+fi
 if ! grep -Eiq '[[:space:]](add|sub)[[:space:]]+v[0-9]+\.8h' "$ROOT/dist/disassembly.txt"; then
   echo "ERROR: no expected NEON 8x16-bit add/sub instructions found." >&2
   exit 1
 fi
 
-# Verify the complete NNUE byte range is present in the final ELF.
 EMBEDDED_SIZE_HEX="$("$READELF" -sW "$OUTPUT" | awk '$8 == "rukchess_embedded_nnue_start" { print $3; exit }')"
 if [[ "$EMBEDDED_SIZE_HEX" =~ ^0x[0-9a-fA-F]+$ || "$EMBEDDED_SIZE_HEX" =~ ^[0-9]+$ ]]; then
   EMBEDDED_SIZE=$((EMBEDDED_SIZE_HEX))
