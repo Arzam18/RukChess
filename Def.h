@@ -9,13 +9,10 @@
 
 // Debug
 
-//#define DEBUG_BIT_BOARD_INIT
-//#define DEBUG_MOVE
-//#define DEBUG_HASH
-//#define DEBUG_IID
-//#define DEBUG_SINGULAR_EXTENSION
+//#define DEBUG_MOVE_BIT_BOARD
+//#define DEBUG_MOVE_HASH
+//#define DEBUG_MOVE_NNUE
 //#define DEBUG_SEE
-//#define DEBUG_NNUE
 
 // Common
 
@@ -69,8 +66,6 @@
 #endif
 
 //#define PRINT_MIN_MAX_VALUES
-//#define PRINT_WEIGHT_INDEX
-//#define PRINT_ACCUMULATOR
 
 // ------------------------------------------------------------------
 
@@ -91,7 +86,7 @@
 #define MAX_GEN_MOVES                           256     // The maximum number of moves in the position
 #define MAX_GAME_MOVES                          1024    // The maximum number of moves in the game
 
-#define MAX_FEN_LENGTH                          256
+#define MAX_FEN_LENGTH                          128     // (8x8 + 7) + 2 + 5 + 3 + 4 + 4 = 89
 
 #define ASPIRATION_WINDOW_START_DEPTH           4
 #define ASPIRATION_WINDOW_INIT_DELTA            17
@@ -106,7 +101,7 @@
 #ifdef __ANDROID__
 #define DEFAULT_NNUE_FILE_NAME                  "embedded" // Android build embeds the default NNUE
 #else
-#define DEFAULT_NNUE_FILE_NAME                  "net-7342fb032855.nnue" // Desktop default remains file-based
+#define DEFAULT_NNUE_FILE_NAME                  "net-7342fb032855.nnue" // 26.05.2025
 #endif
 
 // Time management (Xiphos)

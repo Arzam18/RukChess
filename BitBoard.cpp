@@ -87,7 +87,7 @@ U64 PDEP(const U64 Source, const U64 Mask)
 #if defined(_WIN32)
     return _pdep_u64(Source, Mask);
 #else
-    // Portable parallel-bit deposit. Used to build the sliding attack tables.
+    // Portable parallel-bit deposit for building the sliding attack tables.
     U64 Result = 0ULL;
     U64 RemainingMask = Mask;
     U64 RemainingSource = Source;
@@ -106,7 +106,7 @@ int PEXT(const U64 Source, const U64 Mask)
 #if defined(_WIN32)
     return (int)_pext_u64(Source, Mask);
 #else
-    // Portable parallel-bit extract; the masks used by RukChess are <= 12 bits.
+    // Portable parallel-bit extract; RukChess sliding masks are at most 12 bits.
     U64 Result = 0ULL;
     U64 OutputBit = 1ULL;
     U64 RemainingMask = Mask;
@@ -129,7 +129,7 @@ U64 CalculatePieceAttack(const int Piece, const int Square, const U64 Occupied, 
 
     U64 Result = 0ULL;
 
-    for (int Direction = 0; Direction < 8; ++Direction) {
+    for (int Direction = 0; Direction < 8; Direction++) {
         if (!MoveDelta[Piece][Direction]) { // Out of directions
             break; // for
         }
@@ -172,37 +172,16 @@ void InitAttackTable(const int Piece, const int Square, const U64* BB_Mask, int*
 {
     U64 Occupied;
 
-    U64 Attack;
-
-#ifdef DEBUG_BIT_BOARD_INIT
-    U64 PreviousAttack;
-#endif // DEBUG_BIT_BOARD_INIT
-
     int CountBits = POPCNT(BB_Mask[Square]); // Max. 12 bits (example, rook on a1)
 
     int MaxIndex = 1 << CountBits; // Max. 4096 (1 << 12)
 
     BB_OffsetTable[Square] = *Offset;
 
-    for (int Index = 0; Index < MaxIndex; ++Index) {
+    for (int Index = 0; Index < MaxIndex; Index++) {
         Occupied = PDEP((U64)Index, BB_Mask[Square]);
 
-        Attack = CalculatePieceAttack(Piece, Square, Occupied, FALSE);
-
-#ifdef DEBUG_BIT_BOARD_INIT
-        PreviousAttack = BB_AttackTable[*Offset + Index];
-
-        if (PreviousAttack && PreviousAttack != Attack) {
-            if (Piece == BISHOP) {
-                printf("-- Bishop attack error!\n");
-            }
-            else { // Rook
-                printf("-- Rook attack error!\n");
-            }
-        }
-#endif // DEBUG_BIT_BOARD_INIT
-
-        BB_AttackTable[*Offset + Index] = Attack;
+        BB_AttackTable[*Offset + Index] = CalculatePieceAttack(Piece, Square, Occupied, FALSE);
     }
 
     *Offset += MaxIndex;
@@ -215,14 +194,14 @@ void InitBitBoards(void)
 
     // Init Bishop and Rook mask tables
 
-    for (int Square = 0; Square < 64; ++Square) {
+    for (int Square = 0; Square < 64; Square++) {
         BB_BishopMask[Square] = CalculatePieceAttack(BISHOP, Square, 0ULL, TRUE);
         BB_RookMask[Square] = CalculatePieceAttack(ROOK, Square, 0ULL, TRUE);
     }
 
     // Init Knight and King attack tables; Bishop and Rook offset and attack tables
 
-    for (int Square = 0; Square < 64; ++Square) {
+    for (int Square = 0; Square < 64; Square++) {
         BB_KnightAttack[Square] = CalculatePieceAttack(KNIGHT, Square, 0ULL, FALSE);
         BB_KingAttack[Square] = CalculatePieceAttack(KING, Square, 0ULL, FALSE);
 

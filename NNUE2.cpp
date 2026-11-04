@@ -11,8 +11,9 @@
 #include "Utils.h"
 
 #define NNUE_FILE_MAGIC             ('B' | 'R' << 8 | 'K' << 16 | 'R' << 24)
-//#define NNUE_FILE_HASH            0x00007342FB032855
 #define NNUE_FILE_SIZE              ((INPUT_DIMENSION * HIDDEN_DIMENSION + HIDDEN_DIMENSION + HIDDEN_DIMENSION * 2 + 1) * 4 + 12)
+
+#define NNUE_HASH(Hash, Value)      (((Hash) + (324723947ULL + (Value))) ^ 93485734985ULL)
 
 #define STM                         0
 #define XSTM                        1
@@ -21,7 +22,11 @@
 #define NUM_REGS                    (HIDDEN_DIMENSION * sizeof(I16) / sizeof(__m256i))
 #elif defined(USE_NNUE_NEON)
 #define NUM_REGS                    (HIDDEN_DIMENSION / 8)
-#endif
+#endif // USE_NNUE_NEON
+
+#ifdef USE_NNUE_AVX2
+#define NUM_REGS                    (HIDDEN_DIMENSION * sizeof(I16) / sizeof(__m256i))
+#endif // USE_NNUE_AVX2
 
 _declspec(align(64)) I16 InputWeights[INPUT_DIMENSION * HIDDEN_DIMENSION];
 _declspec(align(64)) I16 InputBiases[HIDDEN_DIMENSION];
@@ -29,6 +34,13 @@ _declspec(align(64)) I16 OutputWeights[HIDDEN_DIMENSION * 2];
 I32 OutputBias;
 
 BOOL NnueFileLoaded = FALSE;
+
+#if defined(__ANDROID__)
+extern "C" {
+extern const unsigned char rukchess_embedded_nnue_start[];
+extern const unsigned char rukchess_embedded_nnue_end[];
+}
+#endif
 
 I16 LoadInt16(const float Value, const int Precision)
 {
@@ -40,23 +52,17 @@ I32 LoadInt32(const float Value, const int Precision)
     return (I32)roundf(Value * (float)Precision);
 }
 
-#if defined(__ANDROID__)
-extern "C" {
-extern const unsigned char rukchess_embedded_nnue_start[];
-extern const unsigned char rukchess_embedded_nnue_end[];
-}
-#endif
-
 static BOOL LoadNetworkData(const unsigned char* Data, const size_t DataSize, const char* DisplayName)
 {
-    if (Data == NULL || DataSize != NNUE_FILE_SIZE) {
+    if (Data == NULL || DataSize != (size_t)NNUE_FILE_SIZE) {
         printf("File '%s' format error (size %zu; expected %d)!\n",
-            DisplayName, DataSize, NNUE_FILE_SIZE);
+            DisplayName != NULL ? DisplayName : "(null)", DataSize, NNUE_FILE_SIZE);
         return FALSE;
     }
 
     int FileMagic;
     U64 FileHash;
+    U64 NnueHash = 0ULL;
     float Value;
     size_t Offset = 0;
 
@@ -71,75 +77,72 @@ static BOOL LoadNetworkData(const unsigned char* Data, const size_t DataSize, co
     Offset += sizeof(FileHash);
 
 #ifdef PRINT_MIN_MAX_VALUES
-    float MinValue;
-    float MaxValue;
-#endif // PRINT_MIN_MAX_VALUES
-
-#ifdef PRINT_MIN_MAX_VALUES
-    MinValue = FLT_MAX;
-    MaxValue = -FLT_MAX;
+    float MinValue = FLT_MAX;
+    float MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
 
     // Feature weights
-    for (int Index = 0; Index < INPUT_DIMENSION * HIDDEN_DIMENSION; ++Index) {
+    for (int Index = 0; Index < INPUT_DIMENSION * HIDDEN_DIMENSION; Index++) {
         memcpy(&Value, Data + Offset, sizeof(Value));
         Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
+        NnueHash = NNUE_HASH(NnueHash, (int)Value);
         InputWeights[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_IN);
     }
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Input weights: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
-#endif // PRINT_MIN_MAX_VALUES
-
-    // Hidden biases
-#ifdef PRINT_MIN_MAX_VALUES
     MinValue = FLT_MAX;
     MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
-    for (int Index = 0; Index < HIDDEN_DIMENSION; ++Index) {
+
+    // Hidden biases
+    for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
         memcpy(&Value, Data + Offset, sizeof(Value));
         Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
+        NnueHash = NNUE_HASH(NnueHash, (int)Value);
         InputBiases[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_IN);
     }
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Input biases: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
-#endif // PRINT_MIN_MAX_VALUES
-
-    // Hidden/output weights
-#ifdef PRINT_MIN_MAX_VALUES
     MinValue = FLT_MAX;
     MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
-    for (int Index = 0; Index < HIDDEN_DIMENSION * 2; ++Index) {
+
+    // Output weights
+    for (int Index = 0; Index < HIDDEN_DIMENSION * 2; Index++) {
         memcpy(&Value, Data + Offset, sizeof(Value));
         Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
+        NnueHash = NNUE_HASH(NnueHash, (int)Value);
         OutputWeights[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_OUT);
     }
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Output weights: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
+    MinValue = FLT_MAX;
+    MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
 
     // Output bias
     memcpy(&Value, Data + Offset, sizeof(Value));
     Offset += sizeof(Value);
+    NnueHash = NNUE_HASH(NnueHash, (int)Value);
     OutputBias = LoadInt32(Value, QUANTIZATION_PRECISION_IN * QUANTIZATION_PRECISION_OUT);
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Output bias: Value = %f\n", Value);
 #endif // PRINT_MIN_MAX_VALUES
 
-    if (Offset != DataSize) {
-        printf("File '%s' format error (unexpected trailing data)!\n", DisplayName);
+    if (Offset != DataSize || FileHash != NnueHash) {
+        printf("File '%s' format/hash error!\n", DisplayName);
         return FALSE;
     }
 
@@ -173,34 +176,31 @@ void LoadNetwork(const char* NnueFileName)
         printf("File '%s' open error!\n", NnueFileName);
         return;
     }
-
     if (fseek(File, 0, SEEK_END) != 0) {
         printf("File '%s' read error!\n", NnueFileName);
         fclose(File);
         return;
     }
     const long FileSize = ftell(File);
-    if (FileSize < 0 || (size_t)FileSize != NNUE_FILE_SIZE || fseek(File, 0, SEEK_SET) != 0) {
+    if (FileSize < 0 || (size_t)FileSize != (size_t)NNUE_FILE_SIZE || fseek(File, 0, SEEK_SET) != 0) {
         printf("File '%s' format error!\n", NnueFileName);
         fclose(File);
         return;
     }
 
-    unsigned char* Buffer = (unsigned char*)malloc(NNUE_FILE_SIZE);
+    unsigned char* Buffer = (unsigned char*)malloc((size_t)NNUE_FILE_SIZE);
     if (Buffer == NULL) {
         printf("File '%s' load error (out of memory)!\n", NnueFileName);
         fclose(File);
         return;
     }
-
-    const size_t BytesRead = fread(Buffer, 1, NNUE_FILE_SIZE, File);
+    const size_t BytesRead = fread(Buffer, 1, (size_t)NNUE_FILE_SIZE, File);
     fclose(File);
-    if (BytesRead != NNUE_FILE_SIZE) {
+    if (BytesRead != (size_t)NNUE_FILE_SIZE) {
         printf("File '%s' read error!\n", NnueFileName);
         free(Buffer);
         return;
     }
-
     LoadNetworkData(Buffer, BytesRead, NnueFileName);
     free(Buffer);
 }
@@ -224,64 +224,56 @@ int CalculateWeightIndex(const int Perspective, const int Square, const int Piec
         WeightIndex = (PieceIndex << 6) + (Square ^ 56);
     }
 
-#ifdef PRINT_WEIGHT_INDEX
-    printf("Perspective = %d Square = %d Piece = %d Color = %d PieceIndex = %d WeightIndex = %d\n", Perspective, Square, PIECE_TYPE(PieceWithColor), PIECE_COLOR(PieceWithColor), PieceIndex, WeightIndex);
-#endif // PRINT_WEIGHT_INDEX
-
     return WeightIndex;
 }
 
 void AccumulatorAdd(BoardItem* Board, int Square, int PieceWithColor)
 {
-    for (int Perspective = 0; Perspective < 2; ++Perspective) { // STM/XSTM
+    for (int Perspective = 0; Perspective < 2; Perspective++) { // STM/XSTM
         int WeightIndex = CalculateWeightIndex(Perspective, Square, PieceWithColor);
 
 #ifdef USE_NNUE_AVX2
         __m256i* AccumulatorTile = (__m256i*)Board->Accumulator.Accumulator[Perspective];
-        __m256i* Weights = (__m256i*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
-
-        for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+        const __m256i* Weights = (const __m256i*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = _mm256_add_epi16(AccumulatorTile[Reg], Weights[Reg]);
         }
 #elif defined(USE_NNUE_NEON)
         int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
         const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
-
-        for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = vaddq_s16(AccumulatorTile[Reg], Weights[Reg]);
         }
 #else
-        for (int Index = 0; Index < HIDDEN_DIMENSION; ++Index) {
+        for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
             Board->Accumulator.Accumulator[Perspective][Index] += InputWeights[WeightIndex * HIDDEN_DIMENSION + Index];
         }
-#endif // USE_NNUE_AVX2
+#endif // NNUE accumulator add
     }
 }
 
 void AccumulatorSub(BoardItem* Board, int Square, int PieceWithColor)
 {
-    for (int Perspective = 0; Perspective < 2; ++Perspective) { // STM/XSTM
+    for (int Perspective = 0; Perspective < 2; Perspective++) { // STM/XSTM
         int WeightIndex = CalculateWeightIndex(Perspective, Square, PieceWithColor);
 
 #ifdef USE_NNUE_AVX2
         __m256i* AccumulatorTile = (__m256i*)Board->Accumulator.Accumulator[Perspective];
-        __m256i* Weights = (__m256i*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
-
-        for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+        const __m256i* Weights = (const __m256i*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = _mm256_sub_epi16(AccumulatorTile[Reg], Weights[Reg]);
         }
 #elif defined(USE_NNUE_NEON)
         int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
         const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
-
-        for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = vsubq_s16(AccumulatorTile[Reg], Weights[Reg]);
         }
 #else
-        for (int Index = 0; Index < HIDDEN_DIMENSION; ++Index) {
+        for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
             Board->Accumulator.Accumulator[Perspective][Index] -= InputWeights[WeightIndex * HIDDEN_DIMENSION + Index];
         }
-#endif // USE_NNUE_AVX2
+#endif // NNUE accumulator sub
     }
 }
 
@@ -311,15 +303,6 @@ I32 OutputLayer(BoardItem* Board)
 {
     I32 Result = OutputBias;
 
-#ifdef PRINT_ACCUMULATOR
-    for (int Index = 0; Index < HIDDEN_DIMENSION; ++Index) {
-        const I16 Acc0 = Board->Accumulator.Accumulator[Board->CurrentColor][Index];
-        const I16 Acc1 = Board->Accumulator.Accumulator[CHANGE_COLOR(Board->CurrentColor)][Index];
-
-        printf("Index = %d Acc0 = %d Acc1 = %d\n", Index, Acc0, Acc1);
-    }
-#endif // PRINT_ACCUMULATOR
-
 #ifdef USE_NNUE_AVX2
     const __m256i ConstZero = _mm256_setzero_si256();
 
@@ -336,7 +319,7 @@ I32 OutputLayer(BoardItem* Board)
     __m256i* Weights0 = (__m256i*)&OutputWeights;
     __m256i* Weights1 = (__m256i*)&OutputWeights[HIDDEN_DIMENSION];
 
-    for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+    for (int Reg = 0; Reg < NUM_REGS; Reg++) {
 #ifdef USE_CRELU
         const __m256i Acc0 = _mm256_max_epi16(ConstZero, _mm256_min_epi16(ConstMax, AccumulatorTile0[Reg])); // CReLU
         const __m256i Acc1 = _mm256_max_epi16(ConstZero, _mm256_min_epi16(ConstMax, AccumulatorTile1[Reg])); // CReLU
@@ -363,13 +346,12 @@ I32 OutputLayer(BoardItem* Board)
 
     int32x4_t Sum0 = vdupq_n_s32(0);
     int32x4_t Sum1 = vdupq_n_s32(0);
-
     const int16x8_t* AccumulatorTile0 = (const int16x8_t*)Board->Accumulator.Accumulator[Board->CurrentColor];
     const int16x8_t* AccumulatorTile1 = (const int16x8_t*)Board->Accumulator.Accumulator[CHANGE_COLOR(Board->CurrentColor)];
     const int16x8_t* Weights0 = (const int16x8_t*)&OutputWeights[0];
     const int16x8_t* Weights1 = (const int16x8_t*)&OutputWeights[HIDDEN_DIMENSION];
 
-    for (int Reg = 0; Reg < NUM_REGS; ++Reg) {
+    for (int Reg = 0; Reg < NUM_REGS; Reg++) {
 #ifdef USE_CRELU
         const int16x8_t Acc0 = vminq_s16(ConstMax, vmaxq_s16(ConstZero, AccumulatorTile0[Reg]));
         const int16x8_t Acc1 = vminq_s16(ConstMax, vmaxq_s16(ConstZero, AccumulatorTile1[Reg]));
@@ -382,10 +364,9 @@ I32 OutputLayer(BoardItem* Board)
         Sum1 = vmlal_s16(Sum1, vget_low_s16(Acc1), vget_low_s16(Weights1[Reg]));
         Sum1 = vmlal_s16(Sum1, vget_high_s16(Acc1), vget_high_s16(Weights1[Reg]));
     }
-
     Result += (I32)vaddvq_s32(vaddq_s32(Sum0, Sum1));
 #else
-    for (int Index = 0; Index < HIDDEN_DIMENSION; ++Index) {
+    for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
 #ifdef USE_CRELU
         const I16 Acc0 = MAX(0, MIN(QUANTIZATION_PRECISION_IN, Board->Accumulator.Accumulator[Board->CurrentColor][Index])); // CReLU
         const I16 Acc1 = MAX(0, MIN(QUANTIZATION_PRECISION_IN, Board->Accumulator.Accumulator[CHANGE_COLOR(Board->CurrentColor)][Index])); // CReLU
@@ -405,8 +386,8 @@ I32 OutputLayer(BoardItem* Board)
 int Evaluate(BoardItem* Board, SearchDataItem* SearchData)
 {
 #ifdef USE_STATISTIC
-    if (SearchData != NULL) {
-        ++SearchData->EvaluateCount;
+    if (SearchData) {
+        SearchData->EvaluateCount++;
     }
 #endif // USE_STATISTIC
 

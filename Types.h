@@ -8,10 +8,8 @@
 #include "Def.h"
 
 #define BOOL                int
-
 #define FALSE               0
 #define TRUE                1
-
 #define INF                 10000
 
 #if defined(_WIN32)

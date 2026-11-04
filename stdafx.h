@@ -35,14 +35,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
-
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
 
-// RukChess is tested as a single-thread mobile engine. The original OpenMP
-// regions remain in the source, but Android builds intentionally execute
-// them serially and advertise one available thread.
+// The mobile build deliberately runs one search thread. OpenMP pragmas in the
+// upstream source remain intact and are ignored by the Android build.
 static inline void omp_set_dynamic(int) {}
 static inline int omp_get_max_threads(void) { return 1; }
 static inline int omp_get_num_threads(void) { return 1; }
@@ -105,6 +103,7 @@ static inline int QueryPerformanceCounter(LARGE_INTEGER* value)
     value->QuadPart = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
     return 1;
 }
+
 static inline int QueryPerformanceFrequency(LARGE_INTEGER* value)
 {
     if (value == NULL) return 0;
@@ -137,7 +136,6 @@ static inline void* rukchess_thread_trampoline(void* opaque)
 }
 
 static inline void _endthread(void) {}
-
 static inline uintptr_t _beginthread(void (*function)(void*), unsigned int, void* argument)
 {
     if (function == NULL) return (uintptr_t)-1;
@@ -147,11 +145,14 @@ static inline uintptr_t _beginthread(void (*function)(void*), unsigned int, void
     start->argument = argument;
 
     pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    // Search has deep recursive frames; use a comfortably sized detached
-    // worker stack instead of relying on the smaller Android default.
+    if (pthread_attr_init(&attributes) != 0) {
+        free(start);
+        return (uintptr_t)-1;
+    }
+    // Search uses recursive frames; give the detached worker a 2 MiB stack.
     pthread_attr_setstacksize(&attributes, 2U * 1024U * 1024U);
     pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+
     pthread_t thread;
     const int result = pthread_create(&thread, &attributes, rukchess_thread_trampoline, start);
     pthread_attr_destroy(&attributes);
@@ -162,5 +163,4 @@ static inline uintptr_t _beginthread(void (*function)(void*), unsigned int, void
     return (uintptr_t)1;
 }
 #endif // _WIN32
-
 #endif // !STDAFX_H

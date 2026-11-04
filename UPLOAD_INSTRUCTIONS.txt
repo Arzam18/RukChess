@@ -1,0 +1,5 @@
+RUKCHESS ANDROID PORT — REBASED SOURCE
+
+Upload the contents of the modified-files-only ZIP into the root of your RukChess repository, preserving folder paths, then commit. This patch is based on the newly supplied upstream source archive; it does not replace your repository with the older Android-port source. Keep the complete-source ZIP as a reference.
+
+Run Actions workflow: Build RukChess for Android ARM64. The host UCI smoke test passed with a synthetic test network, but a full Android NDK build and real-network/device runtime test remain to be confirmed by GitHub Actions and your Galaxy A16.
