@@ -1,0 +1,107 @@
+name: Build RukChess for Android ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android ARM64 NEON engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUKCHESS_NETWORK_URL: ${{ vars.RUKCHESS_NETWORK_URL }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android NDK r27c
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [[ ! -d "$SDK_ROOT" ]]; then
+            echo "Android SDK root not found: $SDK_ROOT" >&2
+            exit 1
+          fi
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -n 1 || true)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "sdkmanager not found under $SDK_ROOT/cmdline-tools" >&2
+            exit 1
+          fi
+          # Avoid treating yes(1)'s expected SIGPIPE as an sdkmanager failure.
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;27.2.12479018"
+          set -o pipefail
+          NDK_HOME="$SDK_ROOT/ndk/27.2.12479018"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          {
+            echo "ANDROID_SDK_ROOT=$SDK_ROOT"
+            echo "ANDROID_NDK_HOME=$NDK_HOME"
+            echo "ANDROID_NDK_ROOT=$NDK_HOME"
+            echo "ANDROID_NDK_VERSION=27.2.12479018"
+            echo "ANDROID_API=24"
+          } >> "$GITHUB_ENV"
+
+      - name: Download and validate RukChess NNUE
+        shell: bash
+        run: |
+          set -euo pipefail
+          NETWORK_URL="${RUKCHESS_NETWORK_URL:-https://raw.githubusercontent.com/Ilya-Ruk/RukChessNets/master/Nets%20183/rukchess_111.nnue}"
+          echo "Downloading RukChess Net 183 / Epoch 111"
+          echo "Source: $NETWORK_URL"
+          curl --fail --location --retry 4 --retry-delay 2 "$NETWORK_URL" \
+            --output net-7342fb032855.nnue
+          BYTES="$(stat -c '%s' net-7342fb032855.nnue)"
+          test "$BYTES" = "1579024" || {
+            echo "Unexpected NNUE size: $BYTES (expected 1579024 bytes)." >&2
+            exit 1
+          }
+          MAGIC="$(od -An -tx1 -N4 net-7342fb032855.nnue | tr -d ' \n')"
+          test "$MAGIC" = "42524b52" || {
+            echo "Invalid RukChess NNUE magic: $MAGIC" >&2
+            exit 1
+          }
+          sha256sum net-7342fb032855.nnue | tee rukchess-network.sha256
+
+      - name: Build ARM64 NEON executable
+        shell: bash
+        run: bash ./scripts/build-android.sh
+
+      - name: Build host reference and run embedded-NNUE UCI smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/host
+          mapfile -t SOURCES < <(find . -maxdepth 1 -type f -name '*.cpp' -printf '%f\n' | sort)
+          cc -c scripts/embedded_nnue.S -o build/host/embedded_nnue.o
+          g++ -std=gnu++17 -O3 -DNDEBUG -pthread -D__ANDROID__ \
+            -Wno-unknown-pragmas -Wno-deprecated-declarations \
+            "${SOURCES[@]}" build/host/embedded_nnue.o -o build/host/RukChess
+          python3 scripts/uci-smoke-test.py "$PWD/build/host/RukChess"
+
+      - name: Upload self-contained Android engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: RukChess-Android-ARM64-NEON
+          path: |
+            dist/RukChess-Android-ARM64-NEON
+            dist/BUILD_INFO.txt
+            dist/SHA256SUMS.txt
+            rukchess-network.sha256
+            dist/readelf-header.txt
+            dist/disassembly.txt
+          if-no-files-found: error
+          retention-days: 30
