@@ -40,7 +40,8 @@ jobs:
             echo "sdkmanager not found under $SDK_ROOT/cmdline-tools" >&2
             exit 1
           fi
-          # Avoid treating yes(1)'s expected SIGPIPE as an sdkmanager failure.
+          # yes exits via SIGPIPE after sdkmanager closes stdin; do not let
+          # pipefail turn that expected behavior into a failed license step.
           set +o pipefail
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;27.2.12479018"
@@ -62,18 +63,11 @@ jobs:
           NETWORK_URL="${RUKCHESS_NETWORK_URL:-https://raw.githubusercontent.com/Ilya-Ruk/RukChessNets/master/Nets%20183/rukchess_111.nnue}"
           echo "Downloading RukChess Net 183 / Epoch 111"
           echo "Source: $NETWORK_URL"
-          curl --fail --location --retry 4 --retry-delay 2 "$NETWORK_URL" \
-            --output net-7342fb032855.nnue
+          curl --fail --location --retry 4 --retry-delay 2 "$NETWORK_URL" --output net-7342fb032855.nnue
           BYTES="$(stat -c '%s' net-7342fb032855.nnue)"
-          test "$BYTES" = "1579024" || {
-            echo "Unexpected NNUE size: $BYTES (expected 1579024 bytes)." >&2
-            exit 1
-          }
+          test "$BYTES" = "1579024" || { echo "Unexpected NNUE size: $BYTES (expected 1579024 bytes)." >&2; exit 1; }
           MAGIC="$(od -An -tx1 -N4 net-7342fb032855.nnue | tr -d ' \n')"
-          test "$MAGIC" = "42524b52" || {
-            echo "Invalid RukChess NNUE magic: $MAGIC" >&2
-            exit 1
-          }
+          test "$MAGIC" = "42524b52" || { echo "Invalid RukChess NNUE magic: $MAGIC" >&2; exit 1; }
           sha256sum net-7342fb032855.nnue | tee rukchess-network.sha256
 
       - name: Build ARM64 NEON executable
@@ -88,7 +82,7 @@ jobs:
           mapfile -t SOURCES < <(find . -maxdepth 1 -type f -name '*.cpp' -printf '%f\n' | sort)
           cc -c scripts/embedded_nnue.S -o build/host/embedded_nnue.o
           g++ -std=gnu++17 -O3 -DNDEBUG -pthread -D__ANDROID__ \
-            -Wno-unknown-pragmas -Wno-deprecated-declarations \
+            -Wno-unknown-pragmas -Wno-deprecated-declarations -Wno-writable-strings \
             "${SOURCES[@]}" build/host/embedded_nnue.o -o build/host/RukChess
           python3 scripts/uci-smoke-test.py "$PWD/build/host/RukChess"
 
@@ -100,8 +94,8 @@ jobs:
             dist/RukChess-Android-ARM64-NEON
             dist/BUILD_INFO.txt
             dist/SHA256SUMS.txt
-            rukchess-network.sha256
             dist/readelf-header.txt
-            dist/disassembly.txt
+            dist/nnue2-disassembly.txt
+            rukchess-network.sha256
           if-no-files-found: error
           retention-days: 30
