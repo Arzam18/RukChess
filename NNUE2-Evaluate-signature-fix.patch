@@ -1,0 +1,21 @@
+diff --git a/NNUE2.cpp b/NNUE2.cpp
+index 0000000..0000000 100644
+--- a/NNUE2.cpp
++++ b/NNUE2.cpp
+@@ -364,12 +364,15 @@ I32 OutputLayer(BoardItem* Board)
+     return (Result * SCALE) / (QUANTIZATION_PRECISION_IN * QUANTIZATION_PRECISION_OUT);
+ }
+ 
+-int Evaluate(BoardItem* Board)
++int Evaluate(BoardItem* Board, SearchDataItem* SearchData)
+ {
++    (void)SearchData;
+ #ifdef USE_STATISTIC
+-    ++Board->EvaluateCount;
++    if (SearchData != NULL) {
++        ++SearchData->EvaluateCount;
++    }
+ #endif // USE_STATISTIC
+ 
+     return (int)OutputLayer(Board);
+ }
