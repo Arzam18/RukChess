@@ -130,11 +130,11 @@ fi
 # the embedded network. AArch64's mandatory Advanced SIMD instructions are
 # recognized by llvm-objdump without an extra --mattr=+neon override.
 printf '\n=== Verify NEON in NNUE accumulator functions ===\n'
-DISASSEMBLY="$ROOT/dist/neon-disassembly.txt"
+DISASSEMBLY="$ROOT/dist/disassembly.txt"
 DISASSEMBLY_SOURCE="final executable"
 OBJ_DUMP_ERROR="$ROOT/dist/objdump-error.txt"
 
-if "$OBJDUMP" -d --disassemble-symbols=_Z13AccumulatorAddP9BoardItemii,_Z13AccumulatorSubP9BoardItemii "$OUTPUT" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
+if "$OBJDUMP" -d --disassemble-symbols=_Z14AccumulatorAddP9BoardItemii,_Z14AccumulatorSubP9BoardItemii "$OUTPUT" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
   echo "NEON disassembly source: final executable"
 else
   STATUS=$?
@@ -144,7 +144,7 @@ else
   # fallback isolates objdump from the large final ELF while still checking
   # the instructions generated for the NNUE functions.
   DISASSEMBLY_SOURCE="NNUE2.o fallback (linked into final executable)"
-  if "$OBJDUMP" -d --disassemble-symbols=_Z13AccumulatorAddP9BoardItemii,_Z13AccumulatorSubP9BoardItemii \
+  if "$OBJDUMP" -d --disassemble-symbols=_Z14AccumulatorAddP9BoardItemii,_Z14AccumulatorSubP9BoardItemii \
       "$ROOT/build/obj/NNUE2.o" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
     echo "NEON disassembly source: NNUE2.o fallback"
   else
@@ -155,8 +155,14 @@ else
   fi
 fi
 
-if ! grep -Eiq '[[:space:]](add|sub)[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
-  echo "ERROR: no expected NEON 8x16-bit add/sub instruction found in AccumulatorAdd/AccumulatorSub." >&2
+if ! grep -Eiq '[[:space:]]add[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
+  echo "ERROR: AccumulatorAdd does not contain the expected NEON 8x16-bit ADD instruction." >&2
+  echo "Disassembly source: $DISASSEMBLY_SOURCE" >&2
+  cat "$DISASSEMBLY" >&2 || true
+  exit 1
+fi
+if ! grep -Eiq '[[:space:]]sub[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
+  echo "ERROR: AccumulatorSub does not contain the expected NEON 8x16-bit SUB instruction." >&2
   echo "Disassembly source: $DISASSEMBLY_SOURCE" >&2
   cat "$DISASSEMBLY" >&2 || true
   exit 1
@@ -180,7 +186,7 @@ Minimum API: Android API 24
 Compiler: Android NDK r27c (27.2.12479018) Clang
 CPU baseline: ARMv8-A Advanced SIMD (NEON)
 NNUE: embedded in executable (1,579,024 bytes); 768 x 512 x 2-perspective, int16 accumulator path
-NEON validation: verified add/sub 8x16-bit instructions in AccumulatorAdd/AccumulatorSub ($DISASSEMBLY_SOURCE)
+NEON validation: verified 8x16-bit ADD and SUB in AccumulatorAdd/AccumulatorSub ($DISASSEMBLY_SOURCE)
 Threads: 1 (Android compatibility build uses serial OpenMP stubs)
 Dotprod: not enabled as a separate variant; this NNUE uses int16 arithmetic and has no native int8 dot-product path.
 Runtime data: none; the default NNUE is embedded. UCI option NnueFile can still load an optional external network.
