@@ -402,10 +402,12 @@ I32 OutputLayer(BoardItem* Board)
     return (Result * SCALE) / (QUANTIZATION_PRECISION_IN * QUANTIZATION_PRECISION_OUT);
 }
 
-int Evaluate(BoardItem* Board)
+int Evaluate(BoardItem* Board, SearchDataItem* SearchData)
 {
 #ifdef USE_STATISTIC
-    ++Board->EvaluateCount;
+    if (SearchData != NULL) {
+        ++SearchData->EvaluateCount;
+    }
 #endif // USE_STATISTIC
 
     return (int)OutputLayer(Board);
