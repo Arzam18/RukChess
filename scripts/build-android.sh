@@ -37,10 +37,9 @@ if [[ "$NETWORK_MAGIC" != "42524b52" ]]; then
   exit 1
 fi
 
-# Prevent a stale one-argument implementation from reaching the linker.
+# The Android source must expose the matching two-argument evaluation function.
 if ! grep -Eq 'int Evaluate\(BoardItem\* Board, SearchDataItem\* SearchData\)' "$ROOT/NNUE2.cpp"; then
   echo "ERROR: NNUE2.cpp does not define Evaluate(BoardItem*, SearchDataItem*)." >&2
-  echo "Replace the repository-root NNUE2.cpp with the version from this fix ZIP." >&2
   exit 1
 fi
 
@@ -112,12 +111,11 @@ run_logged "Link Android ARM64 executable" "$CXX" \
   "$EMBEDDED_OBJECT" \
   -o "$OUTPUT"
 
-echo "\n=== Inspect ELF header ==="
-set +e
-"$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt" 2>> "$LOG"
-STATUS=$?
-set -e
-if (( STATUS != 0 )); then
+printf '\n=== Inspect ELF header ===\n'
+if "$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt" 2>> "$LOG"; then
+  :
+else
+  STATUS=$?
   echo "ERROR: ELF header inspection failed with exit code $STATUS." >&2
   tail -n 100 "$LOG" >&2 || true
   exit "$STATUS"
@@ -127,26 +125,47 @@ if ! grep -q 'Machine:.*AArch64' "$ROOT/dist/readelf-header.txt"; then
   exit 1
 fi
 
-echo "\n=== Disassemble executable for NEON verification ==="
-set +e
-"$OBJDUMP" -d --mattr=+neon "$OUTPUT" > "$ROOT/dist/disassembly.txt" 2>> "$LOG"
-STATUS=$?
-set -e
-if (( STATUS != 0 )); then
-  echo "ERROR: disassembly failed with exit code $STATUS." >&2
-  tail -n 100 "$LOG" >&2 || true
-  exit "$STATUS"
+# Disassemble only the two NNUE accumulator functions by their exact AArch64 C++ ABI symbol names. A whole-executable dump
+# is unnecessary and can trigger tool failures on large binaries containing
+# the embedded network. AArch64's mandatory Advanced SIMD instructions are
+# recognized by llvm-objdump without an extra --mattr=+neon override.
+printf '\n=== Verify NEON in NNUE accumulator functions ===\n'
+DISASSEMBLY="$ROOT/dist/neon-disassembly.txt"
+DISASSEMBLY_SOURCE="final executable"
+OBJ_DUMP_ERROR="$ROOT/dist/objdump-error.txt"
+
+if "$OBJDUMP" -d --disassemble-symbols=_Z13AccumulatorAddP9BoardItemii,_Z13AccumulatorSubP9BoardItemii "$OUTPUT" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
+  echo "NEON disassembly source: final executable"
+else
+  STATUS=$?
+  echo "WARNING: targeted disassembly of final executable returned $STATUS."
+  cat "$OBJ_DUMP_ERROR" >&2 || true
+  # The object is exactly the compiled translation unit linked above. This
+  # fallback isolates objdump from the large final ELF while still checking
+  # the instructions generated for the NNUE functions.
+  DISASSEMBLY_SOURCE="NNUE2.o fallback (linked into final executable)"
+  if "$OBJDUMP" -d --disassemble-symbols=_Z13AccumulatorAddP9BoardItemii,_Z13AccumulatorSubP9BoardItemii \
+      "$ROOT/build/obj/NNUE2.o" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
+    echo "NEON disassembly source: NNUE2.o fallback"
+  else
+    STATUS=$?
+    echo "ERROR: NEON disassembly failed for both the final executable and NNUE2.o (exit $STATUS)." >&2
+    cat "$OBJ_DUMP_ERROR" >&2 || true
+    exit "$STATUS"
+  fi
 fi
-if ! grep -Eiq '[[:space:]](add|sub)[[:space:]]+v[0-9]+\.8h' "$ROOT/dist/disassembly.txt"; then
-  echo "ERROR: no expected NEON 8x16-bit add/sub instructions found." >&2
+
+if ! grep -Eiq '[[:space:]](add|sub)[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
+  echo "ERROR: no expected NEON 8x16-bit add/sub instruction found in AccumulatorAdd/AccumulatorSub." >&2
+  echo "Disassembly source: $DISASSEMBLY_SOURCE" >&2
+  cat "$DISASSEMBLY" >&2 || true
   exit 1
 fi
 
-EMBEDDED_SIZE_HEX="$("$READELF" -sW "$OUTPUT" | awk '$8 == "rukchess_embedded_nnue_start" { print $3; exit }')"
-if [[ "$EMBEDDED_SIZE_HEX" =~ ^0x[0-9a-fA-F]+$ || "$EMBEDDED_SIZE_HEX" =~ ^[0-9]+$ ]]; then
-  EMBEDDED_SIZE=$((EMBEDDED_SIZE_HEX))
-else
-  echo "ERROR: embedded NNUE symbol was not found in the final ELF." >&2
+# Verify that the entire NNUE byte range is embedded in the final ELF.
+EMBEDDED_SIZE="$("$READELF" -sW "$OUTPUT" | awk '$8 == "rukchess_embedded_nnue_start" { print $3; exit }')"
+if [[ ! "$EMBEDDED_SIZE" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: embedded NNUE start symbol was not found or has an invalid size." >&2
   exit 1
 fi
 if [[ "$EMBEDDED_SIZE" != "1579024" ]]; then
@@ -154,15 +173,16 @@ if [[ "$EMBEDDED_SIZE" != "1579024" ]]; then
   exit 1
 fi
 
-cat > "$ROOT/dist/BUILD_INFO.txt" <<'INFO'
+cat > "$ROOT/dist/BUILD_INFO.txt" <<INFO
 Engine: RukChess 4.3.0dev
 Target: Android ARM64 / AArch64
 Minimum API: Android API 24
 Compiler: Android NDK r27c (27.2.12479018) Clang
 CPU baseline: ARMv8-A Advanced SIMD (NEON)
 NNUE: embedded in executable (1,579,024 bytes); 768 x 512 x 2-perspective, int16 accumulator path
+NEON validation: verified add/sub 8x16-bit instructions in AccumulatorAdd/AccumulatorSub ($DISASSEMBLY_SOURCE)
 Threads: 1 (Android compatibility build uses serial OpenMP stubs)
-Dotprod: not enabled as a separate variant; this NNUE's arithmetic is int16 and has no native int8 dot-product path.
+Dotprod: not enabled as a separate variant; this NNUE uses int16 arithmetic and has no native int8 dot-product path.
 Runtime data: none; the default NNUE is embedded. UCI option NnueFile can still load an optional external network.
 INFO
 
