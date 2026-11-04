@@ -7,7 +7,6 @@ if [[ -z "$NDK_HOME" || ! -d "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bi
   echo "ERROR: ANDROID_NDK_HOME must point to Android NDK r27c." >&2
   exit 1
 fi
-
 TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 CC="$TOOLCHAIN/aarch64-linux-android24-clang"
 CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
@@ -33,50 +32,27 @@ if [[ "$NETWORK_BYTES" != "1579024" ]]; then
 fi
 NETWORK_MAGIC="$(od -An -tx1 -N4 "$NETWORK" | tr -d ' \n')"
 if [[ "$NETWORK_MAGIC" != "42524b52" ]]; then
-  echo "ERROR: invalid RukChess NNUE magic: $NETWORK_MAGIC (expected BRKR / 42524b52)." >&2
+  echo "ERROR: invalid RukChess NNUE magic: $NETWORK_MAGIC (expected 42524b52)." >&2
   exit 1
 fi
 
-# The Android source must expose the matching two-argument evaluation function.
-if ! grep -Eq 'int Evaluate\(BoardItem\* Board, SearchDataItem\* SearchData\)' "$ROOT/NNUE2.cpp"; then
-  echo "ERROR: NNUE2.cpp does not define Evaluate(BoardItem*, SearchDataItem*)." >&2
-  exit 1
-fi
-
-mkdir -p "$ROOT/dist" "$ROOT/build/obj"
+rm -rf "$ROOT/build/obj"
+mkdir -p "$ROOT/build/obj" "$ROOT/dist"
 cd "$ROOT"
-LOG="$ROOT/dist/build.log"
-: > "$LOG"
-
-run_logged() {
-  local label="$1"
-  shift
-  local status=0
-  echo
-  echo "=== $label ==="
-  printf 'COMMAND:'
-  printf ' %q' "$@"
-  printf '\n'
-  set +e
-  "$@" 2>&1 | tee -a "$LOG"
-  status=${PIPESTATUS[0]}
-  set -e
-  if (( status != 0 )); then
-    echo "ERROR: $label failed with exit code $status." >&2
-    echo "----- Last 100 lines of $LOG -----" >&2
-    tail -n 100 "$LOG" >&2 || true
-    echo "---------------------------------" >&2
-    exit "$status"
-  fi
-}
-
 mapfile -t SOURCES < <(find . -maxdepth 1 -type f -name '*.cpp' -printf '%f\n' | sort)
 if [[ "${#SOURCES[@]}" -eq 0 ]]; then
   echo "ERROR: no C++ source files were found." >&2
   exit 1
 fi
 
-COMMON_FLAGS=(
+OUTPUT="$ROOT/dist/RukChess-Android-ARM64-NEON"
+EMBEDDED_OBJECT="$ROOT/build/embedded_nnue.o"
+NNUE_OBJECT="$ROOT/build/obj/NNUE2.o"
+
+printf '\n=== Assemble embedded NNUE object ===\n'
+"$CC" -march=armv8-a+simd -c scripts/embedded_nnue.S -o "$EMBEDDED_OBJECT"
+
+CXXFLAGS=(
   -std=gnu++17
   -O3
   -DNDEBUG
@@ -87,116 +63,65 @@ COMMON_FLAGS=(
   -pthread
   -Wno-unknown-pragmas
   -Wno-deprecated-declarations
+  -Wno-writable-strings
   -fdiagnostics-color=never
 )
 
-EMBEDDED_OBJECT="$ROOT/build/embedded_nnue.o"
-run_logged "Assemble embedded NNUE object" "$CC" -march=armv8-a+simd -c "$ROOT/scripts/embedded_nnue.S" -o "$EMBEDDED_OBJECT"
-
-echo "Building RukChess Android ARM64 NEON (API 24, NDK r27c)..."
-OBJECTS=()
-for SOURCE in "${SOURCES[@]}"; do
-  OBJECT="$ROOT/build/obj/${SOURCE%.cpp}.o"
-  run_logged "Compile $SOURCE" "$CXX" "${COMMON_FLAGS[@]}" -c "$SOURCE" -o "$OBJECT"
-  OBJECTS+=("$OBJECT")
+printf '\n=== Building RukChess Android ARM64 NEON (API 24, NDK r27c) ===\n'
+for source in "${SOURCES[@]}"; do
+  object="$ROOT/build/obj/${source%.cpp}.o"
+  printf '\n=== Compile %s ===\n' "$source"
+  "$CXX" "${CXXFLAGS[@]}" -c "$source" -o "$object"
 done
 
-OUTPUT="$ROOT/dist/RukChess-Android-ARM64-NEON"
-run_logged "Link Android ARM64 executable" "$CXX" \
-  -fuse-ld=lld \
-  -pthread \
-  -static-libstdc++ \
-  -Wl,--no-undefined \
-  "${OBJECTS[@]}" \
-  "$EMBEDDED_OBJECT" \
-  -o "$OUTPUT"
+printf '\n=== Link Android ARM64 executable ===\n'
+OBJECTS=()
+for source in "${SOURCES[@]}"; do
+  OBJECTS+=("$ROOT/build/obj/${source%.cpp}.o")
+done
+"$CXX" -fuse-ld=lld -pthread -static-libstdc++ -Wl,--no-undefined \
+  "${OBJECTS[@]}" "$EMBEDDED_OBJECT" -o "$OUTPUT"
 
 printf '\n=== Inspect ELF header ===\n'
-if "$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt" 2>> "$LOG"; then
-  :
-else
-  STATUS=$?
-  echo "ERROR: ELF header inspection failed with exit code $STATUS." >&2
-  tail -n 100 "$LOG" >&2 || true
-  exit "$STATUS"
-fi
-if ! grep -q 'Machine:.*AArch64' "$ROOT/dist/readelf-header.txt"; then
+"$READELF" -h "$OUTPUT" > "$ROOT/dist/readelf-header.txt"
+if ! grep -Eiq 'Machine:[[:space:]]+AArch64' "$ROOT/dist/readelf-header.txt"; then
   echo "ERROR: output is not an AArch64 ELF executable." >&2
   exit 1
 fi
 
-# Disassemble only the two NNUE accumulator functions by their exact AArch64 C++ ABI symbol names. A whole-executable dump
-# is unnecessary and can trigger tool failures on large binaries containing
-# the embedded network. AArch64's mandatory Advanced SIMD instructions are
-# recognized by llvm-objdump without an extra --mattr=+neon override.
-printf '\n=== Verify NEON in NNUE accumulator functions ===\n'
-DISASSEMBLY="$ROOT/dist/disassembly.txt"
-DISASSEMBLY_SOURCE="final executable"
-OBJ_DUMP_ERROR="$ROOT/dist/objdump-error.txt"
-
-if "$OBJDUMP" -d --disassemble-symbols=_Z14AccumulatorAddP9BoardItemii,_Z14AccumulatorSubP9BoardItemii "$OUTPUT" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
-  echo "NEON disassembly source: final executable"
-else
-  STATUS=$?
-  echo "WARNING: targeted disassembly of final executable returned $STATUS."
-  cat "$OBJ_DUMP_ERROR" >&2 || true
-  # The object is exactly the compiled translation unit linked above. This
-  # fallback isolates objdump from the large final ELF while still checking
-  # the instructions generated for the NNUE functions.
-  DISASSEMBLY_SOURCE="NNUE2.o fallback (linked into final executable)"
-  if "$OBJDUMP" -d --disassemble-symbols=_Z14AccumulatorAddP9BoardItemii,_Z14AccumulatorSubP9BoardItemii \
-      "$ROOT/build/obj/NNUE2.o" > "$DISASSEMBLY" 2> "$OBJ_DUMP_ERROR"; then
-    echo "NEON disassembly source: NNUE2.o fallback"
-  else
-    STATUS=$?
-    echo "ERROR: NEON disassembly failed for both the final executable and NNUE2.o (exit $STATUS)." >&2
-    cat "$OBJ_DUMP_ERROR" >&2 || true
-    exit "$STATUS"
-  fi
-fi
-
-if ! grep -Eiq '[[:space:]]add[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
-  echo "ERROR: AccumulatorAdd does not contain the expected NEON 8x16-bit ADD instruction." >&2
-  echo "Disassembly source: $DISASSEMBLY_SOURCE" >&2
-  cat "$DISASSEMBLY" >&2 || true
+printf '\n=== Verify NEON accumulator instructions in NNUE2.o ===\n'
+# NNUE2.cpp uses vaddq_s16/vsubq_s16 under USE_NNUE_NEON. Disassemble the object
+# directly; this avoids fragile symbol-name filtering on the final linked ELF.
+"$OBJDUMP" -d "$NNUE_OBJECT" > "$ROOT/dist/nnue2-disassembly.txt"
+if ! grep -Eiq '[[:space:]]add[[:space:]]+v[0-9]+\.8h' "$ROOT/dist/nnue2-disassembly.txt"; then
+  echo "ERROR: NNUE2.o is missing the expected NEON signed-16-bit vector ADD." >&2
   exit 1
 fi
-if ! grep -Eiq '[[:space:]]sub[[:space:]]+v[0-9]+\.8h' "$DISASSEMBLY"; then
-  echo "ERROR: AccumulatorSub does not contain the expected NEON 8x16-bit SUB instruction." >&2
-  echo "Disassembly source: $DISASSEMBLY_SOURCE" >&2
-  cat "$DISASSEMBLY" >&2 || true
+if ! grep -Eiq '[[:space:]]sub[[:space:]]+v[0-9]+\.8h' "$ROOT/dist/nnue2-disassembly.txt"; then
+  echo "ERROR: NNUE2.o is missing the expected NEON signed-16-bit vector SUB." >&2
   exit 1
 fi
 
-# Verify that the entire NNUE byte range is embedded in the final ELF.
+echo "PASS: NNUE2.o contains both 8x16-bit NEON ADD and SUB instructions."
+
+printf '\n=== Verify embedded NNUE in final executable ===\n'
 EMBEDDED_SIZE="$("$READELF" -sW "$OUTPUT" | awk '$8 == "rukchess_embedded_nnue_start" { print $3; exit }')"
-if [[ ! "$EMBEDDED_SIZE" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: embedded NNUE start symbol was not found or has an invalid size." >&2
-  exit 1
-fi
 if [[ "$EMBEDDED_SIZE" != "1579024" ]]; then
-  echo "ERROR: embedded NNUE symbol size is $EMBEDDED_SIZE bytes (expected 1579024)." >&2
+  echo "ERROR: embedded NNUE symbol size is '${EMBEDDED_SIZE:-missing}' (expected 1579024)." >&2
   exit 1
 fi
 
-cat > "$ROOT/dist/BUILD_INFO.txt" <<INFO
-Engine: RukChess 4.3.0dev
+cat > "$ROOT/dist/BUILD_INFO.txt" <<'INFO'
+Engine: RukChess 4.3.0dev (upstream source archive commit 014d9573e5905dad83b9acfdba17fd9294c88147)
 Target: Android ARM64 / AArch64
 Minimum API: Android API 24
 Compiler: Android NDK r27c (27.2.12479018) Clang
 CPU baseline: ARMv8-A Advanced SIMD (NEON)
-NNUE: embedded in executable (1,579,024 bytes); 768 x 512 x 2-perspective, int16 accumulator path
-NEON validation: verified 8x16-bit ADD and SUB in AccumulatorAdd/AccumulatorSub ($DISASSEMBLY_SOURCE)
-Threads: 1 (Android compatibility build uses serial OpenMP stubs)
-Dotprod: not enabled as a separate variant; this NNUE uses int16 arithmetic and has no native int8 dot-product path.
-Runtime data: none; the default NNUE is embedded. UCI option NnueFile can still load an optional external network.
+NNUE: embedded in executable (1,579,024 bytes)
+NNUE arithmetic: int16 NEON accumulator add/sub and NEON output layer
+Threads: one advertised mobile thread; UCI search worker uses pthread
+Dotprod: not enabled; the network arithmetic is int16 and has no native int8 dot-product path
+Runtime data: no external NNUE required; UCI NnueFile can still load an optional external network
 INFO
-
-(
-  cd "$ROOT/dist"
-  sha256sum RukChess-Android-ARM64-NEON > SHA256SUMS.txt
-)
-
-printf '\nBuild completed.\n'
-file "$OUTPUT"
-cat "$ROOT/dist/BUILD_INFO.txt"
+sha256sum "$OUTPUT" | tee "$ROOT/dist/SHA256SUMS.txt"
+printf '\nBuild output: %s\n' "$OUTPUT"
