@@ -105,11 +105,28 @@ fi
 echo "PASS: NNUE2.o contains both 8x16-bit NEON ADD and SUB instructions."
 
 printf '\n=== Verify embedded NNUE in final executable ===\n'
-EMBEDDED_SIZE="$("$READELF" -sW "$OUTPUT" | awk '$8 == "rukchess_embedded_nnue_start" { print $3; exit }')"
-if [[ "$EMBEDDED_SIZE" != "1579024" ]]; then
-  echo "ERROR: embedded NNUE symbol size is '${EMBEDDED_SIZE:-missing}' (expected 1579024)." >&2
+# Do not pipe llvm-readelf directly into an awk program that exits as soon as
+# it sees the symbol. The symbol can appear in .dynsym before .symtab; early
+# awk exit closes the pipe and can make llvm-readelf terminate with EPIPE
+# (reported by the NDK tool as exit code 74). Capture the complete symbol table
+# first, then parse the file so llvm-readelf always reaches EOF normally.
+SYMBOL_TABLE="$ROOT/dist/final-symbol-table.txt"
+if ! "$READELF" -sW "$OUTPUT" > "$SYMBOL_TABLE"; then
+  echo "ERROR: NDK llvm-readelf could not inspect the final executable symbol table." >&2
   exit 1
 fi
+EMBEDDED_SIZE="$(awk '$NF == "rukchess_embedded_nnue_start" { size = $3 } END { if (size != "") print size }' "$SYMBOL_TABLE")"
+if [[ -z "$EMBEDDED_SIZE" ]]; then
+  echo "ERROR: embedded NNUE start symbol is missing from the final executable." >&2
+  grep -F 'rukchess_embedded_nnue_' "$SYMBOL_TABLE" || true
+  exit 1
+fi
+if [[ "$EMBEDDED_SIZE" != "1579024" ]]; then
+  echo "ERROR: embedded NNUE symbol size is '$EMBEDDED_SIZE' (expected 1579024)." >&2
+  grep -F 'rukchess_embedded_nnue_' "$SYMBOL_TABLE" || true
+  exit 1
+fi
+echo "PASS: final executable contains the complete 1,579,024-byte embedded NNUE."
 
 cat > "$ROOT/dist/BUILD_INFO.txt" <<'INFO'
 Engine: RukChess 4.3.0dev (upstream source archive commit 014d9573e5905dad83b9acfdba17fd9294c88147)
