@@ -18,9 +18,11 @@
 #define STM                         0
 #define XSTM                        1
 
-#ifdef USE_NNUE_AVX2
+#if defined(USE_NNUE_AVX2)
 #define NUM_REGS                    (HIDDEN_DIMENSION * sizeof(I16) / sizeof(__m256i))
-#endif // USE_NNUE_AVX2
+#elif defined(USE_NNUE_NEON)
+#define NUM_REGS                    (HIDDEN_DIMENSION / 8)
+#endif
 
 _declspec(align(64)) I16 InputWeights[INPUT_DIMENSION * HIDDEN_DIMENSION];
 _declspec(align(64)) I16 InputBiases[HIDDEN_DIMENSION];
@@ -28,6 +30,13 @@ _declspec(align(64)) I16 OutputWeights[HIDDEN_DIMENSION * 2];
 I32 OutputBias;
 
 BOOL NnueFileLoaded = FALSE;
+
+#if defined(__ANDROID__)
+extern "C" {
+extern const unsigned char rukchess_embedded_nnue_start[];
+extern const unsigned char rukchess_embedded_nnue_end[];
+}
+#endif
 
 I16 LoadInt16(const float Value, const int Precision)
 {
@@ -39,119 +48,78 @@ I32 LoadInt32(const float Value, const int Precision)
     return (I32)roundf(Value * (float)Precision);
 }
 
-void LoadNetwork(const char* NnueFileName)
+static BOOL LoadNetworkData(const unsigned char* Data, const size_t DataSize, const char* DisplayName)
 {
-    FILE* File;
+    if (Data == NULL || DataSize != (size_t)NNUE_FILE_SIZE) {
+        printf("File '%s' format error (size %zu; expected %d)!\n",
+            DisplayName != NULL ? DisplayName : "(null)", DataSize, NNUE_FILE_SIZE);
+        return FALSE;
+    }
 
     int FileMagic;
     U64 FileHash;
-
     U64 NnueHash = 0ULL;
-
     float Value;
+    size_t Offset = 0;
 
-    int FilePos;
-
-#ifdef PRINT_MIN_MAX_VALUES
-    float MinValue;
-    float MaxValue;
-#endif // PRINT_MIN_MAX_VALUES
-
-    printf("\n");
-
-    printf("Load network...\n");
-
-    NnueFileLoaded = FALSE; // The network may have been loaded earlier
-
-    fopen_s(&File, NnueFileName, "rb");
-
-    if (File == NULL) { // File open error
-        printf("File '%s' open error!\n", NnueFileName);
-
-        return;
+    memcpy(&FileMagic, Data + Offset, sizeof(FileMagic));
+    Offset += sizeof(FileMagic);
+    if (FileMagic != NNUE_FILE_MAGIC) {
+        printf("File '%s' format error (invalid magic)!\n", DisplayName);
+        return FALSE;
     }
 
-    // File magic
-
-    fread(&FileMagic, 4, 1, File);
-
-    if (FileMagic != NNUE_FILE_MAGIC) { // File format error
-        printf("File '%s' format error!\n", NnueFileName);
-
-        fclose(File);
-
-        return;
-    }
-
-    // File hash (part 1)
-
-    fread(&FileHash, sizeof(U64), 1, File);
-
-    // Feature weights
+    memcpy(&FileHash, Data + Offset, sizeof(FileHash));
+    Offset += sizeof(FileHash);
 
 #ifdef PRINT_MIN_MAX_VALUES
-    MinValue = FLT_MAX;
-    MaxValue = -FLT_MAX;
+    float MinValue = FLT_MAX;
+    float MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
 
+    // Keep the upstream network conversion and hash semantics unchanged.
     for (int Index = 0; Index < INPUT_DIMENSION * HIDDEN_DIMENSION; Index++) {
-        fread(&Value, sizeof(float), 1, File);
-
+        memcpy(&Value, Data + Offset, sizeof(Value));
+        Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
-
         NnueHash = NNUE_HASH(NnueHash, (U64)Value);
-
         InputWeights[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_IN);
     }
 
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Input weights: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
-#endif // PRINT_MIN_MAX_VALUES
-
-    // Hidden biases
-
-#ifdef PRINT_MIN_MAX_VALUES
     MinValue = FLT_MAX;
     MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
 
     for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
-        fread(&Value, sizeof(float), 1, File);
-
+        memcpy(&Value, Data + Offset, sizeof(Value));
+        Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
-
         NnueHash = NNUE_HASH(NnueHash, (U64)Value);
-
         InputBiases[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_IN);
     }
 
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Input biases: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
-#endif // PRINT_MIN_MAX_VALUES
-
-    // Hidden weights
-
-#ifdef PRINT_MIN_MAX_VALUES
     MinValue = FLT_MAX;
     MaxValue = -FLT_MAX;
 #endif // PRINT_MIN_MAX_VALUES
 
     for (int Index = 0; Index < HIDDEN_DIMENSION * 2; Index++) {
-        fread(&Value, sizeof(float), 1, File);
-
+        memcpy(&Value, Data + Offset, sizeof(Value));
+        Offset += sizeof(Value);
 #ifdef PRINT_MIN_MAX_VALUES
         MinValue = MIN(MinValue, Value);
         MaxValue = MAX(MaxValue, Value);
 #endif // PRINT_MIN_MAX_VALUES
-
         NnueHash = NNUE_HASH(NnueHash, (U64)Value);
-
         OutputWeights[Index] = LoadInt16(Value, QUANTIZATION_PRECISION_OUT);
     }
 
@@ -159,61 +127,77 @@ void LoadNetwork(const char* NnueFileName)
     printf("Output weights: MinValue = %f MaxValue = %f\n", MinValue, MaxValue);
 #endif // PRINT_MIN_MAX_VALUES
 
-    // Output bias
-
-    fread(&Value, sizeof(float), 1, File);
-
+    memcpy(&Value, Data + Offset, sizeof(Value));
+    Offset += sizeof(Value);
     NnueHash = NNUE_HASH(NnueHash, (U64)Value);
-
     OutputBias = LoadInt32(Value, QUANTIZATION_PRECISION_IN * QUANTIZATION_PRECISION_OUT);
 
 #ifdef PRINT_MIN_MAX_VALUES
     printf("Output bias: Value = %f\n", Value);
 #endif // PRINT_MIN_MAX_VALUES
 
-    // Get the current position of the file pointer
-
-    FilePos = ftell(File);
-
-    if (FilePos != NNUE_FILE_SIZE) { // File format error
-        printf("File '%s' format error!\n", NnueFileName);
-
-        fclose(File);
-
-        return;
+    if (Offset != DataSize || FileHash != NnueHash) {
+        printf("File '%s' format/hash error!\n", DisplayName);
+        return FALSE;
     }
-
-    // Set the pointer to the ending of the file
-
-    fseek(File, 0, SEEK_END);
-
-    // Get the current position of the file pointer
-
-    FilePos = ftell(File);
-
-    if (FilePos != NNUE_FILE_SIZE) { // File format error
-        printf("File '%s' format error!\n", NnueFileName);
-
-        fclose(File);
-
-        return;
-    }
-
-    // File hash (part 2)
-
-    if (FileHash != NnueHash) { // File format error
-        printf("File '%s' format error!\n", NnueFileName);
-
-        fclose(File);
-
-        return;
-    }
-
-    fclose(File);
 
     NnueFileLoaded = TRUE;
+    printf("Load network...DONE (%s; 0x%012llx)\n", DisplayName, FileHash);
+    return TRUE;
+}
 
-    printf("Load network...DONE (%s; 0x%012llx)\n", NnueFileName, FileHash);
+void LoadNetwork(const char* NnueFileName)
+{
+    printf("\nLoad network...\n");
+    NnueFileLoaded = FALSE;
+
+#if defined(__ANDROID__)
+    const BOOL UseEmbedded = (NnueFileName == NULL || NnueFileName[0] == '\0' ||
+        strcmp(NnueFileName, "embedded") == 0);
+    if (UseEmbedded) {
+        const size_t EmbeddedSize = (size_t)((uintptr_t)rukchess_embedded_nnue_end -
+            (uintptr_t)rukchess_embedded_nnue_start);
+        LoadNetworkData(rukchess_embedded_nnue_start, EmbeddedSize, "embedded");
+        return;
+    }
+#endif
+
+    if (NnueFileName == NULL || NnueFileName[0] == '\0') {
+        NnueFileName = DEFAULT_NNUE_FILE_NAME;
+    }
+
+    FILE* File = NULL;
+    if (fopen_s(&File, NnueFileName, "rb") != 0 || File == NULL) {
+        printf("File '%s' open error!\n", NnueFileName);
+        return;
+    }
+    if (fseek(File, 0, SEEK_END) != 0) {
+        printf("File '%s' read error!\n", NnueFileName);
+        fclose(File);
+        return;
+    }
+    const long FileSize = ftell(File);
+    if (FileSize < 0 || (size_t)FileSize != (size_t)NNUE_FILE_SIZE || fseek(File, 0, SEEK_SET) != 0) {
+        printf("File '%s' format error!\n", NnueFileName);
+        fclose(File);
+        return;
+    }
+
+    unsigned char* Buffer = (unsigned char*)malloc((size_t)NNUE_FILE_SIZE);
+    if (Buffer == NULL) {
+        printf("File '%s' load error (out of memory)!\n", NnueFileName);
+        fclose(File);
+        return;
+    }
+    const size_t BytesRead = fread(Buffer, 1, (size_t)NNUE_FILE_SIZE, File);
+    fclose(File);
+    if (BytesRead != (size_t)NNUE_FILE_SIZE) {
+        printf("File '%s' read error!\n", NnueFileName);
+        free(Buffer);
+        return;
+    }
+    LoadNetworkData(Buffer, BytesRead, NnueFileName);
+    free(Buffer);
 }
 
 BOOL IsNetworkLoaded(void)
@@ -250,6 +234,12 @@ void AccumulatorAdd(BoardItem* Board, int Square, int PieceWithColor)
         for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = _mm256_add_epi16(AccumulatorTile[Reg], Weights[Reg]);
         }
+#elif defined(USE_NNUE_NEON)
+        int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
+        const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
+            AccumulatorTile[Reg] = vaddq_s16(AccumulatorTile[Reg], Weights[Reg]);
+        }
 #else
         for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
             Board->Accumulator.Accumulator[Perspective][Index] += InputWeights[WeightIndex * HIDDEN_DIMENSION + Index];
@@ -269,6 +259,12 @@ void AccumulatorSub(BoardItem* Board, int Square, int PieceWithColor)
 
         for (int Reg = 0; Reg < NUM_REGS; Reg++) {
             AccumulatorTile[Reg] = _mm256_sub_epi16(AccumulatorTile[Reg], Weights[Reg]);
+        }
+#elif defined(USE_NNUE_NEON)
+        int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
+        const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        for (int Reg = 0; Reg < NUM_REGS; Reg++) {
+            AccumulatorTile[Reg] = vsubq_s16(AccumulatorTile[Reg], Weights[Reg]);
         }
 #else
         for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
@@ -335,6 +331,31 @@ I32 OutputLayer(const BoardItem* Board)
     const __m128i R1 = _mm_add_epi32(R2, _mm_srli_si128(R2, 4));
 
     Result += _mm_cvtsi128_si32(R1);
+#elif defined(USE_NNUE_NEON)
+    const int16x8_t ConstZero = vdupq_n_s16(0);
+#ifdef USE_CRELU
+    const int16x8_t ConstMax = vdupq_n_s16(QUANTIZATION_PRECISION_IN);
+#endif // USE_CRELU
+    int32x4_t Sum0 = vdupq_n_s32(0);
+    int32x4_t Sum1 = vdupq_n_s32(0);
+    const int16x8_t* AccumulatorTile0 = (const int16x8_t*)Board->Accumulator.Accumulator[Board->CurrentColor];
+    const int16x8_t* AccumulatorTile1 = (const int16x8_t*)Board->Accumulator.Accumulator[CHANGE_COLOR(Board->CurrentColor)];
+    const int16x8_t* Weights0 = (const int16x8_t*)&OutputWeights[0];
+    const int16x8_t* Weights1 = (const int16x8_t*)&OutputWeights[HIDDEN_DIMENSION];
+    for (int Reg = 0; Reg < NUM_REGS; Reg++) {
+#ifdef USE_CRELU
+        const int16x8_t Acc0 = vminq_s16(ConstMax, vmaxq_s16(ConstZero, AccumulatorTile0[Reg]));
+        const int16x8_t Acc1 = vminq_s16(ConstMax, vmaxq_s16(ConstZero, AccumulatorTile1[Reg]));
+#else
+        const int16x8_t Acc0 = vmaxq_s16(ConstZero, AccumulatorTile0[Reg]);
+        const int16x8_t Acc1 = vmaxq_s16(ConstZero, AccumulatorTile1[Reg]);
+#endif // USE_CRELU
+        Sum0 = vmlal_s16(Sum0, vget_low_s16(Acc0), vget_low_s16(Weights0[Reg]));
+        Sum0 = vmlal_s16(Sum0, vget_high_s16(Acc0), vget_high_s16(Weights0[Reg]));
+        Sum1 = vmlal_s16(Sum1, vget_low_s16(Acc1), vget_low_s16(Weights1[Reg]));
+        Sum1 = vmlal_s16(Sum1, vget_high_s16(Acc1), vget_high_s16(Weights1[Reg]));
+    }
+    Result += (I32)vaddvq_s32(vaddq_s32(Sum0, Sum1));
 #else
     for (int Index = 0; Index < HIDDEN_DIMENSION; Index++) {
 #ifdef USE_CRELU

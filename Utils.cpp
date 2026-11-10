@@ -20,11 +20,15 @@ U64 RandState = 0ULL; // The state can be seeded with any value
 */
 U64 Clock(void)
 {
+#if defined(_WIN32)
     struct _timeb timebuffer;
-
     _ftime_s(&timebuffer);
-
     return timebuffer.time * 1000ULL + (U64)timebuffer.millitm;
+#else
+    struct timespec timebuffer;
+    if (clock_gettime(CLOCK_MONOTONIC, &timebuffer) != 0) return 0ULL;
+    return (U64)timebuffer.tv_sec * 1000ULL + (U64)(timebuffer.tv_nsec / 1000000ULL);
+#endif
 }
 
 /*

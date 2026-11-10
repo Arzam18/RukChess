@@ -17,7 +17,7 @@ void UpdateHeuristic(const BoardItem* Board, SearchDataItem* SearchData, int** C
 void ClearHeuristic(SearchDataItem* SearchData);
 
 #ifdef COUNTER_MOVE_HISTORY
-void SetCounterMoveHistoryPointer(const BoardItem* Board, const SearchDataItem* SearchData, const int** CMH_Pointer, const int Ply);
+void SetCounterMoveHistoryPointer(const BoardItem* Board, SearchDataItem* SearchData, int** CMH_Pointer, const int Ply);
 #endif // COUNTER_MOVE_HISTORY
 
 #ifdef KILLER_MOVE
