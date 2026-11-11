@@ -61,14 +61,6 @@ void Pgn2Fen(void)
         return;
     }
 
-    // Cache not used
-
-    InitHashTable(1);
-
-    // Threads not used
-
-    omp_set_num_threads(1);
-
     // Prepare new game
 
     GameNumber = 1;
@@ -91,7 +83,7 @@ void Pgn2Fen(void)
     char Buf[4096];
 
     while (fgets(Buf, sizeof(Buf), FileIn) != NULL) {
-        const char* Part = Buf;
+        char* Part = Buf;
 
         if (*Part == '\r' || *Part == '\n') { // Empty string
             if (Stage == STAGE_NOTATION) {
