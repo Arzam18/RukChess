@@ -63,26 +63,58 @@ U64 BB_RookAttack[102400];
 
 int POPCNT(const U64 Source)
 {
+#if defined(_WIN32)
     return (int)__popcnt64(Source);
+#else
+    return __builtin_popcountll((unsigned long long)Source);
+#endif
 }
 
 int LSB(const U64 Source)
 {
+#if defined(_WIN32)
     unsigned long Index;
-
     _BitScanForward64(&Index, Source);
-
     return (int)Index;
+#else
+    return __builtin_ctzll((unsigned long long)Source);
+#endif
 }
 
 U64 PDEP(const U64 Source, const U64 Mask)
 {
+#if defined(_WIN32)
     return _pdep_u64(Source, Mask);
+#else
+    U64 Result = 0ULL;
+    U64 RemainingMask = Mask;
+    U64 RemainingSource = Source;
+    while (RemainingMask) {
+        const U64 LowestBit = RemainingMask & (~RemainingMask + 1ULL);
+        if (RemainingSource & 1ULL) Result |= LowestBit;
+        RemainingSource >>= 1;
+        RemainingMask &= RemainingMask - 1ULL;
+    }
+    return Result;
+#endif
 }
 
 int PEXT(const U64 Source, const U64 Mask)
 {
+#if defined(_WIN32)
     return (int)_pext_u64(Source, Mask);
+#else
+    U64 Result = 0ULL;
+    U64 OutputBit = 1ULL;
+    U64 RemainingMask = Mask;
+    while (RemainingMask) {
+        const U64 LowestBit = RemainingMask & (~RemainingMask + 1ULL);
+        if (Source & LowestBit) Result |= OutputBit;
+        OutputBit <<= 1;
+        RemainingMask &= RemainingMask - 1ULL;
+    }
+    return (int)Result;
+#endif
 }
 
 U64 CalculatePieceAttack(const int Piece, const int Square, const U64 Occupied, const BOOL Truncate)

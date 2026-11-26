@@ -56,7 +56,11 @@
 
 // NNUE
 
+#if defined(__aarch64__) && !defined(_WIN32)
+#define USE_NNUE_NEON
+#elif defined(_WIN32)
 #define USE_NNUE_AVX2
+#endif
 
 // ------------------------------------------------------------------
 
@@ -89,7 +93,11 @@
 #define MAX_THREADS                             64
 
 #define DEFAULT_BOOK_FILE_NAME                  "book.txt"              // 25.10.2026
+#if defined(__ANDROID__)
+#define DEFAULT_NNUE_FILE_NAME                  "embedded" // Embedded Android network
+#else
 #define DEFAULT_NNUE_FILE_NAME                  "net-7342fb032855.nnue" // 26.05.2025
+#endif
 
 // Time management (Xiphos)
 

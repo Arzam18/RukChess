@@ -35,7 +35,7 @@ void ClearHeuristic(SearchDataItem* SearchData)
 }
 
 #ifdef COUNTER_MOVE_HISTORY
-void SetCounterMoveHistoryPointer(const BoardItem* Board, const SearchDataItem* SearchData, const int** CMH_Pointer, const int Ply)
+void SetCounterMoveHistoryPointer(const BoardItem* Board, SearchDataItem* SearchData, int** CMH_Pointer, const int Ply)
 {
     if (Ply == 0) {
         CMH_Pointer[0] = NULL;
