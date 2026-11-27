@@ -7,11 +7,12 @@
 3. Updated BONUS formula
 4. Changed DEFAULT_HASH_TABLE_SIZE to 256
 5. Separated search data from board
-6. New neural net ((768x256)x2->1, CReLU, Qin=255, Qout=64, Scale=272)?
-7. New book file (434173 positions)?
-8. Added nodes in UCI go command
-9. Project updated to Microsoft VS 2026
-10. Corrected the code
+6. New accumulator update code
+7. New AVX2 code
+8. New book file (509842 positions)
+9. Added nodes in UCI go command
+10. Project updated to Microsoft VS 2026
+11. Corrected the code
 
 ## RukChess 4.2.0 (11.01.2026)
 
