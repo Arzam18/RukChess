@@ -252,9 +252,12 @@ void AccumulatorAdd1Sub1(BoardItem* Board, int Square1, int PieceWithColor1, int
         }
 #elif defined(USE_NNUE_NEON)
         int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
-        const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        const int16x8_t* Weights1 = (const int16x8_t*)&InputWeights[WeightIndex1 * HIDDEN_DIMENSION];
+        const int16x8_t* Weights2 = (const int16x8_t*)&InputWeights[WeightIndex2 * HIDDEN_DIMENSION];
         for (int Reg = 0; Reg < NUM_REGS; Reg++) {
-            AccumulatorTile[Reg] = vaddq_s16(AccumulatorTile[Reg], Weights[Reg]);
+            // Keep the same wrapping int16 arithmetic as the AVX2 and scalar paths.
+            const int16x8_t Diff = vsubq_s16(Weights1[Reg], Weights2[Reg]);
+            AccumulatorTile[Reg] = vaddq_s16(AccumulatorTile[Reg], Diff);
         }
 #else
         I16* __restrict Accumulator = Board->Accumulator.Accumulator[Perspective];
@@ -301,9 +304,14 @@ void AccumulatorAdd1Sub2(BoardItem* Board, int Square1, int PieceWithColor1, int
         }
 #elif defined(USE_NNUE_NEON)
         int16x8_t* AccumulatorTile = (int16x8_t*)Board->Accumulator.Accumulator[Perspective];
-        const int16x8_t* Weights = (const int16x8_t*)&InputWeights[WeightIndex * HIDDEN_DIMENSION];
+        const int16x8_t* Weights1 = (const int16x8_t*)&InputWeights[WeightIndex1 * HIDDEN_DIMENSION];
+        const int16x8_t* Weights2 = (const int16x8_t*)&InputWeights[WeightIndex2 * HIDDEN_DIMENSION];
+        const int16x8_t* Weights3 = (const int16x8_t*)&InputWeights[WeightIndex3 * HIDDEN_DIMENSION];
         for (int Reg = 0; Reg < NUM_REGS; Reg++) {
-            AccumulatorTile[Reg] = vsubq_s16(AccumulatorTile[Reg], Weights[Reg]);
+            // Preserve the upstream formula: accumulator += W1 - (W2 + W3).
+            const int16x8_t Subtrahends = vaddq_s16(Weights2[Reg], Weights3[Reg]);
+            const int16x8_t Diff = vsubq_s16(Weights1[Reg], Subtrahends);
+            AccumulatorTile[Reg] = vaddq_s16(AccumulatorTile[Reg], Diff);
         }
 #else
         I16* __restrict Accumulator = Board->Accumulator.Accumulator[Perspective];
